@@ -301,12 +301,17 @@ async function mainLoop() {
         dashboard.broadcastSignal({ ...analysis, marketTitle: market.title, asset: market.asset });
 
         // ── Decision ──
-        const shouldBet = analysis.edge >= config.risk.minEdgePercent
+        const edgeOk = !isNaN(analysis.edge) && analysis.edge >= config.risk.minEdgePercent;
+        const shouldBet = edgeOk
           && ['BET', 'STRONG_BET'].includes(analysis.recommendation)
           && losingStreak < config.risk.maxLosingStreak;
 
         if (shouldBet) {
           const betAmount = calcBetAmount(analysis, bankroll);
+          if (betAmount < 5) {
+            log.warn(`⚠️ Bet amount ${betAmount} CC < 5 CC minimum — skipping`);
+            continue;
+          }
           const outcomeIdx = market.isRange ? analysis.outcomeIndex : (analysis.prediction === 'YES' ? 0 : 1);
 
           log.signal(analysis.prediction, market.title, analysis.confidence, analysis.reasoning);
@@ -345,11 +350,16 @@ async function mainLoop() {
 }
 
 function calcBetAmount(analysis, bankroll) {
+  const MIN_BET = 5; // API minimum
+  if (bankroll < MIN_BET) return 0; // Can't afford to bet
+
   const kelly = (analysis.kellyFraction || 0) / 100;
-  const kellyAmt = kelly * bankroll * 0.5;
-  const maxAmt = Math.min(config.risk.maxBetCC, bankroll * (config.risk.maxBetPercent / 100));
-  const amount = Math.min(Math.max(5, kellyAmt), maxAmt); // Min 5 CC per API requirement
-  return Math.round(amount * 10000) / 10000;
+  const kellyAmt = kelly * bankroll * 0.5; // half-Kelly
+  const maxAmt = config.risk.maxBetCC;
+
+  // Ensure at least MIN_BET, at most maxBetCC
+  const amount = Math.min(Math.max(MIN_BET, kellyAmt), maxAmt);
+  return Math.round(Math.min(amount, bankroll) * 10000) / 10000;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
