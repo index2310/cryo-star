@@ -10,8 +10,8 @@ const log = new Logger(config.logLevel);
 const PROVIDERS = {
   groq: {
     baseURL: 'https://api.groq.com/openai/v1',
-    model: 'llama-3.1-70b-versatile',
-    name: 'Groq (Llama 3.1 70B)',
+    model: 'llama-3.3-70b-versatile',
+    name: 'Groq (Llama 3.3 70B)',
   },
   deepseek: {
     baseURL: 'https://api.deepseek.com',

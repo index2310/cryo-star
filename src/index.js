@@ -73,7 +73,7 @@ async function getCachedPrices(coinId) {
 }
 
 // ─── Market Analysis ──────────────────────────────────────────────
-const COIN_MAP = { BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', CC: 'canton-coin' };
+const COIN_MAP = { BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', CC: 'bitcoin' }; // CC uses BTC as proxy since canton-coin not on CoinGecko
 
 function isCryptoMarket(m) {
   return (m.category || '').toLowerCase() === 'crypto';
@@ -348,7 +348,8 @@ function calcBetAmount(analysis, bankroll) {
   const kelly = (analysis.kellyFraction || 0) / 100;
   const kellyAmt = kelly * bankroll * 0.5;
   const maxAmt = Math.min(config.risk.maxBetCC, bankroll * (config.risk.maxBetPercent / 100));
-  return Math.round(Math.min(Math.max(0.01, kellyAmt), maxAmt) * 10000) / 10000;
+  const amount = Math.min(Math.max(5, kellyAmt), maxAmt); // Min 5 CC per API requirement
+  return Math.round(amount * 10000) / 10000;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
