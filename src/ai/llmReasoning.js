@@ -143,11 +143,18 @@ export class LLMReasoning {
 
         this._callCount++;
 
+        // Robust parsing: handle strings like "65%", nulls, etc
+        const rawProb = parseFloat(parsed.probability);
+        const rawConf = parseFloat(parsed.confidence);
+        const confidence = isNaN(rawConf) ? 50 : Math.min(100, Math.max(0, rawConf));
+        const probValue = !isNaN(rawProb) ? rawProb : confidence;
+        const calibratedProb = Math.min(1, Math.max(0, probValue / 100));
+
         return {
           prediction: parsed.prediction || 'NEUTRAL',
-          confidence: Math.min(100, Math.max(0, parsed.confidence || 50)),
+          confidence,
           reasoning: parsed.reasoning || 'No reasoning provided',
-          calibratedProb: Math.min(1, Math.max(0, (parsed.probability ?? parsed.confidence ?? 50) / 100)),
+          calibratedProb: isNaN(calibratedProb) ? 0.5 : calibratedProb,
         };
       } catch (err) {
         if (err.status === 429 || err.message?.includes('429')) {

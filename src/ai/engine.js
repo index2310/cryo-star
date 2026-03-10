@@ -178,24 +178,28 @@ export class AIEngine {
    * v5.0: Combine signals with confidence gating and agreement bonus
    */
   _combineSignals(ta, stats, llm, market) {
+    // Helper: ensure we never get NaN in the math pipeline
+    const safeNum = (v, fallback = 0.5) => (typeof v === 'number' && !isNaN(v) && isFinite(v)) ? v : fallback;
+
     // Convert each signal to a "YES probability"
 
     // ── Technical: BULLISH → prob above target ──
     let taProbYes = 0.5;
-    if (ta.signal === 'BULLISH') taProbYes = 0.5 + (ta.confidence - 50) / 100;
-    if (ta.signal === 'BEARISH') taProbYes = 0.5 - (ta.confidence - 50) / 100;
+    const taConf = safeNum(ta.confidence, 50);
+    if (ta.signal === 'BULLISH') taProbYes = 0.5 + (taConf - 50) / 100;
+    if (ta.signal === 'BEARISH') taProbYes = 0.5 - (taConf - 50) / 100;
 
     // ── Statistical ──
-    const statProbYes = stats.probAbove;
+    const statProbYes = safeNum(stats.probAbove, 0.5);
 
     // ── LLM (v5.0: use calibrated probability) ──
-    let llmProbYes = llm.calibratedProb ?? 0.5;
+    let llmProbYes = safeNum(llm.calibratedProb, 0.5);
     if (llm.prediction === 'NO' && llmProbYes > 0.5) llmProbYes = 1 - llmProbYes; // fix inversion
 
     // ── Confidence gating: dampen low-confidence signals ──
-    const taWeight = this.weights.technical * this._confidenceGate(ta.confidence);
-    const statWeight = this.weights.statistical * this._confidenceGate(stats.confidence);
-    const llmWeight = this.weights.llm * this._confidenceGate(llm.confidence);
+    const taWeight = this.weights.technical * this._confidenceGate(safeNum(ta.confidence, 50));
+    const statWeight = this.weights.statistical * this._confidenceGate(safeNum(stats.confidence, 50));
+    const llmWeight = this.weights.llm * this._confidenceGate(safeNum(llm.confidence, 50));
     const totalWeight = taWeight + statWeight + llmWeight;
 
     // Weighted average with gated weights
@@ -224,7 +228,8 @@ export class AIEngine {
       adjustedProbYes = 0.5 + (combinedProbYes - 0.5) * 0.70;
     }
 
-    // Clamp
+    // Clamp + final NaN guard
+    adjustedProbYes = safeNum(adjustedProbYes, 0.5);
     adjustedProbYes = Math.max(0.02, Math.min(0.98, adjustedProbYes));
 
     const prediction = adjustedProbYes >= 0.5 ? 'YES' : 'NO';
