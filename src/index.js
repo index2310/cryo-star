@@ -361,9 +361,10 @@ async function mainLoop() {
         // Broadcast to dashboard
         dashboard.broadcastSignal({ ...analysis, marketTitle: market.title, asset: market.asset });
 
-        // ── Decision (v5.0: stricter criteria) ──
+        // ── Decision (v5.0: stricter criteria, but STRONG_BET bypasses consensus) ──
         const edgeOk = !isNaN(analysis.edge) && analysis.edge >= config.risk.minEdgePercent;
-        const consensusOk = analysis.consensusMet !== false; // range markets don't have this
+        const isStrongBet = analysis.recommendation === 'STRONG_BET';
+        const consensusOk = isStrongBet || analysis.consensusMet !== false; // STRONG_BET skips consensus
         const shouldBet = edgeOk
           && consensusOk
           && ['BET', 'STRONG_BET'].includes(analysis.recommendation)
