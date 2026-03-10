@@ -19,13 +19,16 @@ const config = {
     baseUrl: 'https://unhedged.gg',
   },
 
-  // Risk management
+  // Risk management (v5.0: stricter defaults)
   risk: {
     maxBetCC: parseFloat(process.env.MAX_BET_CC || '10'),
     maxBetPercent: parseFloat(process.env.MAX_BET_PERCENT || '5'),
-    minEdgePercent: parseFloat(process.env.MIN_EDGE_PERCENT || '10'),
+    minEdgePercent: parseFloat(process.env.MIN_EDGE_PERCENT || '12'),    // raised from 10%
     minTimeLeftMinutes: parseFloat(process.env.MIN_TIME_LEFT_MINUTES || '5'),
     maxLosingStreak: parseInt(process.env.MAX_LOSING_STREAK || '3'),
+    minPoolCC: parseFloat(process.env.MIN_POOL_CC || '20'),              // v5.0: skip thin markets
+    maxDrawdownPercent: parseFloat(process.env.MAX_DRAWDOWN_PERCENT || '20'), // v5.0: circuit breaker
+    sessionLossLimitCC: parseFloat(process.env.SESSION_LOSS_LIMIT_CC || '50'), // v5.0: max loss per session
   },
 
   // Bot mode

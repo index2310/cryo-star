@@ -1,12 +1,13 @@
-// src/db.js — Trade Logger using sql.js (pure JavaScript SQLite)
+// src/db.js — v5.0 Trade Logger with Outcome Tracking
+// Adds: resolution tracking, component accuracy, losing streak persistence
 import initSqlJs from 'sql.js';
 import config from './config.js';
 import fs from 'fs';
 import path from 'path';
 
 /**
- * Trade database for logging all analysis results, bets, and outcomes.
- * Uses sql.js (Emscripten-compiled SQLite) for zero native dependencies.
+ * Trade database — v5.0
+ * Now tracks: resolutions, per-component accuracy, persistent losing streak
  */
 export class TradeDB {
   constructor(dbPath = config.dbPath) {
@@ -16,7 +17,6 @@ export class TradeDB {
   }
 
   async _init() {
-    // Ensure data directory exists
     const dir = path.dirname(this.dbPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -24,7 +24,6 @@ export class TradeDB {
 
     const SQL = await initSqlJs();
 
-    // Load existing database if it exists
     if (fs.existsSync(this.dbPath)) {
       const buffer = fs.readFileSync(this.dbPath);
       this.db = new SQL.Database(buffer);
@@ -33,6 +32,7 @@ export class TradeDB {
     }
 
     this._initTables();
+    this._migrate(); // v5.0 migration
   }
 
   _initTables() {
@@ -40,9 +40,11 @@ export class TradeDB {
       CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+        market_id TEXT,
         market_title TEXT NOT NULL,
         market_url TEXT,
         category TEXT,
+        asset TEXT,
         target_price REAL,
         current_price REAL,
         prediction TEXT,
@@ -50,6 +52,7 @@ export class TradeDB {
         edge REAL,
         kelly_fraction REAL,
         recommendation TEXT,
+        agreement_score INTEGER,
         bet_direction TEXT,
         bet_amount REAL,
         bet_placed INTEGER DEFAULT 0,
@@ -62,6 +65,9 @@ export class TradeDB {
         llm_confidence REAL,
         llm_reasoning TEXT,
         outcome TEXT,
+        resolution_price REAL,
+        resolved_at TEXT,
+        pnl_cc REAL,
         profit_loss REAL,
         resolved INTEGER DEFAULT 0
       )
@@ -79,6 +85,36 @@ export class TradeDB {
         losing_streak INTEGER DEFAULT 0
       )
     `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS bankroll_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+        balance REAL,
+        locked REAL,
+        session_pnl REAL
+      )
+    `);
+  }
+
+  /**
+   * v5.0 migration: add new columns to existing databases
+   */
+  _migrate() {
+    const addColumnIfMissing = (table, column, type) => {
+      try {
+        this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      } catch {
+        // column already exists — ignore
+      }
+    };
+
+    addColumnIfMissing('trades', 'market_id', 'TEXT');
+    addColumnIfMissing('trades', 'asset', 'TEXT');
+    addColumnIfMissing('trades', 'agreement_score', 'INTEGER');
+    addColumnIfMissing('trades', 'resolution_price', 'REAL');
+    addColumnIfMissing('trades', 'resolved_at', 'TEXT');
+    addColumnIfMissing('trades', 'pnl_cc', 'REAL');
   }
 
   async ensureReady() {
@@ -94,16 +130,20 @@ export class TradeDB {
   logTrade(data) {
     this.db.run(
       `INSERT INTO trades (
-        market_title, market_url, category, target_price, current_price,
+        market_id, market_title, market_url, category, asset,
+        target_price, current_price,
         prediction, confidence, edge, kelly_fraction, recommendation,
+        agreement_score,
         bet_direction, bet_amount, bet_placed, dry_run,
         ta_signal, ta_confidence, stat_prob_above, stat_prob_below,
         llm_prediction, llm_confidence, llm_reasoning
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        data.marketId || '',
         data.market || '',
         data.marketUrl || '',
         data.category || '',
+        data.asset || '',
         data.targetPrice || null,
         data.currentPrice || null,
         data.prediction || '',
@@ -111,6 +151,7 @@ export class TradeDB {
         data.edge || 0,
         data.kellyFraction || 0,
         data.recommendation || '',
+        data.agreementScore || null,
         data.betDirection || '',
         data.betAmount || 0,
         data.betPlaced ? 1 : 0,
@@ -123,6 +164,104 @@ export class TradeDB {
         data.components?.llm?.confidence || 0,
         data.reasoning || '',
       ]
+    );
+    this._save();
+  }
+
+  /**
+   * v5.0: Mark a trade as resolved with outcome
+   */
+  markResolved(marketId, outcome, pnl, resolutionPrice = null) {
+    this.db.run(
+      `UPDATE trades SET
+        outcome = ?, pnl_cc = ?, profit_loss = ?, resolution_price = ?,
+        resolved = 1, resolved_at = datetime('now')
+      WHERE market_id = ? AND resolved = 0`,
+      [outcome, pnl, pnl, resolutionPrice, marketId]
+    );
+    this._save();
+  }
+
+  /**
+   * v5.0: Get per-component accuracy over last N resolved trades
+   * Returns: { ta_accuracy, stat_accuracy, llm_accuracy, total }
+   */
+  getComponentAccuracy(windowSize = 50) {
+    try {
+      const stmt = this.db.prepare(
+        `SELECT prediction, outcome, ta_signal, stat_prob_above, llm_prediction, target_price, resolution_price
+         FROM trades WHERE resolved = 1 AND outcome IS NOT NULL
+         ORDER BY timestamp DESC LIMIT ?`
+      );
+      stmt.bind([windowSize]);
+
+      let taCorrect = 0, statCorrect = 0, llmCorrect = 0, total = 0;
+
+      while (stmt.step()) {
+        const row = stmt.getAsObject();
+        const wasYes = row.outcome === 'WIN' ? row.prediction === 'YES' || row.prediction === 'NO' : false;
+        const actualAbove = row.resolution_price > row.target_price;
+
+        // TA accuracy: was the signal direction correct?
+        const taBullish = row.ta_signal === 'BULLISH';
+        if ((taBullish && actualAbove) || (!taBullish && !actualAbove)) taCorrect++;
+
+        // Stats accuracy: was prob_above > 0.5 when price went above?
+        const statPredAbove = row.stat_prob_above > 0.5;
+        if ((statPredAbove && actualAbove) || (!statPredAbove && !actualAbove)) statCorrect++;
+
+        // LLM accuracy
+        const llmYes = row.llm_prediction === 'YES';
+        if ((llmYes && actualAbove) || (!llmYes && !actualAbove)) llmCorrect++;
+
+        total++;
+      }
+      stmt.free();
+
+      if (total === 0) return { ta_accuracy: 0.5, stat_accuracy: 0.5, llm_accuracy: 0.5, total: 0 };
+
+      return {
+        ta_accuracy: taCorrect / total,
+        stat_accuracy: statCorrect / total,
+        llm_accuracy: llmCorrect / total,
+        total,
+      };
+    } catch {
+      return { ta_accuracy: 0.5, stat_accuracy: 0.5, llm_accuracy: 0.5, total: 0 };
+    }
+  }
+
+  /**
+   * v5.0: Get current losing streak (persistent across restarts)
+   */
+  getLosingStreak() {
+    try {
+      const stmt = this.db.prepare(
+        `SELECT outcome FROM trades
+         WHERE bet_placed = 1 AND resolved = 1 AND outcome IS NOT NULL
+         ORDER BY timestamp DESC LIMIT 20`
+      );
+
+      let streak = 0;
+      while (stmt.step()) {
+        const row = stmt.getAsObject();
+        if (row.outcome === 'LOSS') streak++;
+        else break; // streak broken
+      }
+      stmt.free();
+      return streak;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * v5.0: Save bankroll snapshot
+   */
+  saveBankrollSnapshot(balance, locked, sessionPnl) {
+    this.db.run(
+      `INSERT INTO bankroll_snapshots (balance, locked, session_pnl) VALUES (?, ?, ?)`,
+      [balance, locked, sessionPnl]
     );
     this._save();
   }
@@ -161,6 +300,7 @@ export class TradeDB {
       losses: losses.count,
       winRate: total.count > 0 ? ((wins.count / total.count) * 100).toFixed(1) + '%' : 'N/A',
       totalProfit: profit.total || 0,
+      losingStreak: this.getLosingStreak(),
     };
   }
 
